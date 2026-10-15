@@ -19,6 +19,7 @@ from core.utils.yjs import (
     base64_yjs_to_text,
     base64_yjs_to_xml,
     extract_attachments,
+    extract_interlinking_links,
 )
 
 pytestmark = pytest.mark.django_db
@@ -283,3 +284,229 @@ def test_utils_lowercase_keys_does_not_mutate_source():
     lowercase_keys(data)
 
     assert data == {"Status": "processing"}
+
+
+# --- Helpers to build BlockNote-shaped yjs content -----------------------
+
+
+def interlink_node(doc_id, block_id="", disabled=False, trigger="/"):
+    """Build an interlinking inline content node as the editor saves it."""
+
+    return pycrdt.XmlElement(
+        "interlinkingLinkInline",
+        {
+            "docId": str(doc_id),
+            "blockId": str(block_id),
+            "disabled": disabled,
+            "trigger": trigger,
+        },
+    )
+
+
+def text_node(text):
+    """Build an yjs text run (a fragment of a block's rich text)."""
+
+    return pycrdt.XmlText(text)
+
+
+def block(block_id, content_type, *children, **attrs):
+    """Build a blockContainer wrapping a block content element."""
+
+    return pycrdt.XmlElement(
+        "blockContainer",
+        {"id": str(block_id)},
+        [pycrdt.XmlElement(content_type, attrs, list(children))],
+    )
+
+
+def paragraph_block(block_id, *children, **attrs):
+    """Build a paragraph block with mixed text/interlinking children."""
+
+    return block(block_id, "paragraph", *children, **attrs)
+
+
+def document_update(*blocks_):
+    """Wrap blocks in a blockGroup the way BlockNote stores the document."""
+
+    ydoc = pycrdt.Doc()
+    ydoc["document-store"] = pycrdt.XmlFragment(
+        [pycrdt.XmlElement("blockGroup", {}, list(blocks_))]
+    )
+    return ydoc.get_update()
+
+
+# --- extract_interlinking_links ------------------------------------------
+
+
+def test_extract_interlinking_links_empty_or_plain_text():
+    """No node means no link, on empty input or on a plain text document."""
+
+    assert extract_interlinking_links(b"") == []
+    assert extract_interlinking_links(None) == []
+
+    update = document_update(paragraph_block(uuid.uuid4(), text_node("plain text")))
+    assert extract_interlinking_links(update) == []
+
+
+def test_extract_interlinking_links_document_and_block_links():
+    """A document link and a block link are both extracted."""
+
+    target_doc = uuid.uuid4()
+    target_block = uuid.uuid4()
+    block_id = uuid.uuid4()
+
+    update = document_update(
+        paragraph_block(
+            block_id,
+            text_node("See "),
+            interlink_node(target_doc),
+            text_node(" and "),
+            interlink_node(target_doc, target_block),
+        )
+    )
+
+    links = extract_interlinking_links(update)
+    # Two links to the same document in the same block collapse to one row,
+    # keeping the first block anchor (here an empty one).
+    assert links == [
+        {
+            "source_block_id": str(block_id),
+            "target_id": str(target_doc),
+            "target_block_id": "",
+            "excerpt": "See and",
+        }
+    ]
+
+
+def test_extract_interlinking_links_separate_blocks_are_separate_rows():
+    """Links to the same document from two blocks produce two results."""
+
+    target_doc = uuid.uuid4()
+    block1 = uuid.uuid4()
+    block2 = uuid.uuid4()
+
+    update = document_update(
+        paragraph_block(block1, interlink_node(target_doc)),
+        paragraph_block(block2, interlink_node(target_doc, uuid.uuid4())),
+    )
+
+    links = extract_interlinking_links(update)
+
+    assert {(link["source_block_id"], link["target_id"]) for link in links} == {
+        (str(block1), str(target_doc)),
+        (str(block2), str(target_doc)),
+    }
+
+
+def test_extract_interlinking_links_nested_block():
+    """A link inside a nested block is attached to its nearest container."""
+
+    target_doc = uuid.uuid4()
+    parent_block = uuid.uuid4()
+    child_block = uuid.uuid4()
+
+    child = block(child_block, "paragraph", interlink_node(target_doc))
+    parent = pycrdt.XmlElement(
+        "blockContainer",
+        {"id": str(parent_block)},
+        [
+            pycrdt.XmlElement(
+                "bulletListItem", {"textAlignment": "left"}, [text_node("parent")]
+            ),
+            pycrdt.XmlElement("blockGroup", {}, [child]),
+        ],
+    )
+
+    update = document_update(parent)
+    links = extract_interlinking_links(update)
+
+    assert len(links) == 1
+    assert links[0]["source_block_id"] == str(child_block)
+    # The excerpt is the child block text, never the parent block text
+    assert links[0]["excerpt"] == ""
+
+
+def test_extract_interlinking_links_in_table():
+    """Links inside table cells are extracted."""
+
+    target_doc = uuid.uuid4()
+    cell_block = uuid.uuid4()
+
+    table = pycrdt.XmlElement(
+        "blockContainer",
+        {"id": str(uuid.uuid4())},
+        [
+            pycrdt.XmlElement(
+                "table",
+                {},
+                [
+                    pycrdt.XmlElement(
+                        "tableRow",
+                        {},
+                        [
+                            pycrdt.XmlElement(
+                                "tableCell",
+                                {},
+                                [
+                                    block(
+                                        cell_block,
+                                        "paragraph",
+                                        text_node("cell "),
+                                        interlink_node(target_doc),
+                                    )
+                                ],
+                            )
+                        ],
+                    )
+                ],
+            )
+        ],
+    )
+
+    update = document_update(table)
+    links = extract_interlinking_links(update)
+
+    assert len(links) == 1
+    assert links[0]["source_block_id"] == str(cell_block)
+    assert links[0]["target_id"] == str(target_doc)
+    assert links[0]["excerpt"] == "cell"
+
+
+def test_extract_interlinking_links_ignores_plain_hyperlinks():
+    """A regular URL mark is not an interlinking inline content node."""
+
+    block_id = uuid.uuid4()
+    hyperlink = pycrdt.XmlElement(
+        "link", {"href": "https://example.com/docs/something"}, [text_node("site")]
+    )
+
+    update = document_update(paragraph_block(block_id, hyperlink))
+    assert extract_interlinking_links(update) == []
+
+
+def test_extract_interlinking_links_ignores_invalid_nodes():
+    """Empty, invalid or disabled interlinking nodes produce no result."""
+
+    target_doc = uuid.uuid4()
+
+    update = document_update(
+        paragraph_block(uuid.uuid4(), interlink_node("")),
+        paragraph_block(uuid.uuid4(), interlink_node("not-a-uuid")),
+        paragraph_block(uuid.uuid4(), interlink_node(target_doc, disabled=True)),
+    )
+
+    assert extract_interlinking_links(update) == []
+
+
+def test_extract_interlinking_links_excerpt_is_truncated():
+    """The excerpt is capped to the block text length the panel displays."""
+
+    target_doc = uuid.uuid4()
+    long_text = "a" * 500
+
+    update = document_update(
+        paragraph_block(uuid.uuid4(), text_node(long_text), interlink_node(target_doc))
+    )
+
+    links = extract_interlinking_links(update)
+    assert len(links[0]["excerpt"]) == 200

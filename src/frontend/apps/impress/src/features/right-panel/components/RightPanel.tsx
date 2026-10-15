@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { css } from 'styled-components';
 
 import { Box } from '@/components';
+import { BacklinksSideBar } from '@/features/docs/doc-backlinks';
 import { CommentSideBar } from '@/features/docs/doc-comments/components/CommentSideBar';
 import { useDocStore, useProviderStore } from '@/features/docs/doc-management';
 import { TableContentSideBar } from '@/features/docs/doc-table-content/components/TableContentSideBar';
@@ -66,7 +67,9 @@ export const RightPanel = () => {
       ? t('Comments side panel')
       : renderedPanel === 'tableContent'
         ? t('Table of contents side panel')
-        : t('Side panel');
+        : renderedPanel === 'backlinks'
+          ? t('Documents referencing this one')
+          : t('Side panel');
 
   const handleClose = () => {
     setIsPanelOpen(false);
@@ -114,6 +117,9 @@ export const RightPanel = () => {
         <TableContentSideBar onClose={handleClose} />
       )}
       {renderedPanel === 'comments' && <CommentSideBar onClose={handleClose} />}
+      {renderedPanel === 'backlinks' && (
+        <BacklinksSideBar docId={doc.id} onClose={handleClose} />
+      )}
     </Box>
   );
 };

@@ -379,6 +379,31 @@ class User(AbstractBaseUser, BaseModel, auth_models.PermissionsMixin):
 
                     if ydoc_update:
                         service.create_ydoc(sandbox_document, ydoc_update)
+                        # The copy is seeded straight to yhub: schedule an
+                        # indexing of the document links the template carries,
+                        # without waiting for a first edit or the reindex
+                        # command. Sent by task name so the models do not
+                        # import the tasks that import the services back, once
+                        # the signup is committed; a broker failure must not
+                        # fail the signup, the reindex command catches it up.
+                        from impress.celery_app import (  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+                            app as celery_app,
+                        )
+
+                        def schedule_links_indexing():
+                            try:
+                                celery_app.send_task(
+                                    "core.tasks.document_links.index_document_links_task",
+                                    args=[str(sandbox_document.id)],
+                                )
+                            except Exception:  # pylint: disable=broad-except
+                                logger.exception(
+                                    "Could not schedule the link indexing of "
+                                    "onboarding sandbox %s",
+                                    sandbox_document.id,
+                                )
+
+                        transaction.on_commit(schedule_links_indexing)
             except YHubError:
                 # Onboarding is not worth failing a signup for, and a sandbox
                 # the content of which could not be copied is not one we want
@@ -1400,6 +1425,7 @@ class Document(MP_Node, BaseModel):
             "ai_transform": ai_access,
             "ai_translate": ai_access,
             "attachment_upload": can_update,
+            "backlinks": can_get and user.is_authenticated,
             "media_check": can_get,
             "children_list": can_get,
             "children_create": can_create_children,
@@ -1796,6 +1822,54 @@ class DocumentAccess(BaseAccess):
             "retrieve": (self.user and self.user.id == user.id) or is_owner_or_admin,
             "set_role_to": set_role_to,
         }
+
+
+class DocumentLink(BaseModel):
+    """
+    A document link (interlinking) from a block of a source document to another
+    document, optionally to one of its blocks.
+
+    Rows are computed from the content the collaboration server holds
+    (`core.services.document_links`), one row per (source, target, source block):
+    several links to the same target in the same block collapse to one row. They
+    are kept while the source document sits in the trash bin and disappear with
+    it on hard deletion, via the cascades.
+    """
+
+    source = models.ForeignKey(
+        Document,
+        on_delete=models.CASCADE,
+        related_name="outgoing_links",
+    )
+    target = models.ForeignKey(
+        Document,
+        on_delete=models.CASCADE,
+        related_name="incoming_links",
+    )
+    source_block_id = models.CharField(max_length=255)
+    target_block_id = models.CharField(max_length=255, blank=True, default="")
+    excerpt = models.CharField(max_length=200, blank=True, default="")
+
+    class Meta:
+        db_table = "impress_document_link"
+        ordering = ("-created_at",)
+        verbose_name = _("Document link")
+        verbose_name_plural = _("Document links")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "target", "source_block_id"],
+                name="unique_document_link_source_target_block",
+                violation_error_message=_(
+                    "This document link already exists for this source block."
+                ),
+            )
+        ]
+
+    def __str__(self):
+        return (
+            f"link from document {self.source_id} block "
+            f"{self.source_block_id} to {self.target_id}"
+        )
 
 
 class DocumentAskForAccess(BaseModel):

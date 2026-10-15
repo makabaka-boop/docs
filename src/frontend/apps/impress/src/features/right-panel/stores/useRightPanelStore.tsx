@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-export type RightPanelView = 'tableContent' | 'comments';
+export type RightPanelView = 'tableContent' | 'comments' | 'backlinks';
 
 export interface UseRightPanelStore {
   isPanelOpen: boolean;

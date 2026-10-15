@@ -60,6 +60,10 @@ from core.services.converter_services import (
 from core.services.converter_services import (
     ValidationError as YProviderValidationError,
 )
+from core.services.document_links import (
+    get_document_backlinks,
+    reindex_document_links,
+)
 from core.services.jwt_services import (
     ConfigurationError as JWTConfigurationError,
 )
@@ -70,6 +74,7 @@ from core.services.search_indexers import (
 )
 from core.services.yhub_services import YHubError, YHubService
 from core.tasks.access import reset_service_connections_on_commit
+from core.tasks.document_links import index_document_links_task
 from core.tasks.documents import sync_service_restorations_in_cascade
 from core.tasks.mail import send_ask_for_access_mail, send_mention_notification_mail
 from core.tasks.search import trigger_batch_document_indexer
@@ -527,6 +532,11 @@ class DocumentViewSet(
           occurs. Omit for mentions in the document body.
         Returns: 201 with the created mention.
 
+    17. **Backlinks**: List documents referencing the current one.
+        Example: GET /documents/{id}/backlinks/
+        Returns the readable source documents and the blocks of theirs that
+        link to the current document. Available to any authenticated reader.
+
     ### Ordering: created_at, updated_at, is_favorite, title
 
         Example:
@@ -766,6 +776,18 @@ class DocumentViewSet(
                 {"file": ["Could not save the imported file content"]}
             ) from err
 
+        # The content was written straight to yhub, no "content updated"
+        # notification will follow until the document is edited: index the
+        # document links it carries straight from the update we already hold.
+        # A failure here is not a failure of the creation itself, the next
+        # content notification reindexes the document.
+        try:
+            reindex_document_links(document.id, update=update)
+        except Exception:  # pylint: disable=broad-except
+            logger.exception(
+                "Could not index the document links of new document %s", document.id
+            )
+
     def perform_create(self, serializer):
         """Set the current user as creator and owner of the newly created object."""
 
@@ -931,7 +953,10 @@ class DocumentViewSet(
 
         The new content is then read back from the collaboration server to
         refresh the search index, in a task: this call is on the path of a
-        worker persisting a document, it only records what happened.
+        worker persisting a document, it only records what happened. The
+        interlinking links ("referenced by" panel) are recomputed the same way,
+        in their own task and regardless of whether a search backend is
+        configured.
 
         The update is written without going through the model: saving it would
         index the document a second time, through the post_save signal.
@@ -950,6 +975,10 @@ class DocumentViewSet(
         # Throttled like any other change: the collaboration server calls this
         # once per debounce window, for as long as a document is being edited.
         trigger_batch_document_indexer(document_id, updated_at)
+
+        # Always scheduled: the backlinks panel must work without a configured
+        # search service. The task reads the current content back from yhub.
+        index_document_links_task.delay(str(document_id))
 
         return drf_response.Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -1605,6 +1634,18 @@ class DocumentViewSet(
                     extracted_attachments & set(source.attachments)
                 )
 
+                # The copy was seeded straight into yhub from an update we
+                # already hold, and no content notification follows a seed:
+                # index the links it carries now. A failure here must not undo
+                # the duplication, the next content notification reindexes.
+                try:
+                    reindex_document_links(duplicated.id, update=update)
+                except Exception:  # pylint: disable=broad-except
+                    logger.exception(
+                        "Could not index the document links of duplicated document %s",
+                        duplicated.id,
+                    )
+
             models.Document.objects.bulk_update(seeded, ["attachments"])
         except Exception:
             # a saga must compensate on any failure, expected or not: whatever
@@ -2166,6 +2207,27 @@ class DocumentViewSet(
         request = utils.generate_s3_authorization_headers(key)
 
         return drf.response.Response("authorized", headers=request.headers, status=200)
+
+    @drf.decorators.action(detail=True, methods=["get"], url_path="backlinks")
+    def backlinks(self, request, *args, **kwargs):
+        """
+        List the documents referencing the current one through an editor
+        document link (interlinking), grouped by source document.
+
+        Only sources the current user is a member of (directly or through an
+        ancestor) and that are not in the trash bin are returned: the list,
+        the titles, the excerpts and the count never reveal references coming
+        from unreadable documents. The response carries no total beyond the
+        visible groups.
+        """
+        document = self.get_object()
+
+        sources = get_document_backlinks(document, request.user)
+        serializer = serializers.BacklinkSourceSerializer(sources, many=True)
+
+        return drf_response.Response(
+            {"count": len(serializer.data), "results": serializer.data}
+        )
 
     @drf.decorators.action(detail=True, methods=["get"], url_path="media-check")
     def media_check(self, request, *args, **kwargs):

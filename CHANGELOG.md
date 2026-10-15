@@ -8,6 +8,8 @@ and this project adheres to
 
 ### Added
 
+- ✨(backend) index interlinking document links and expose a backlinks API
+- ✨(frontend) add a "Documents referencing this one" panel in the sidebar
 - ✨(backend) add a setting for the http fallback polling interval #2827
 - ✨(backend) add a setting to turn off awareness on the http fallback #2827
 

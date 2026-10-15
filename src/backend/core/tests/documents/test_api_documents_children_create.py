@@ -372,6 +372,37 @@ def test_api_documents_children_create_with_docx_file_success(
     )
 
 
+@patch("core.api.viewsets.YHubService")
+@patch("core.services.converter_services.Converter.convert")
+def test_api_documents_children_create_with_file_indexes_document_links(
+    mock_convert, mock_yhub, settings
+):
+    """Creating a child with content triggers a document links reindex."""
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+    settings.CONVERSION_UPLOAD_ENABLED = True
+
+    converted_yjs = b"\x01\x02raw yjs update"
+    mock_convert.return_value = converted_yjs
+    upload = BytesIO(b"fake docx content")
+    upload.name = "child.docx"
+
+    parent = factories.DocumentFactory(creator=user, users=[(user, "owner")])
+
+    with mock.patch("core.api.viewsets.reindex_document_links") as mock_reindex:
+        response = client.post(
+            f"/api/v1.0/documents/{parent.id}/children/",
+            {"file": upload},
+            format="multipart",
+        )
+
+    assert response.status_code == 201
+    child = Document.objects.get(pk=response.json()["id"])
+    mock_reindex.assert_called_once_with(child.id, update=converted_yjs)
+    mock_yhub.return_value.create_ydoc.assert_called_once()
+
+
 @patch("core.services.converter_services.Converter.convert")
 def test_api_documents_children_create_with_docx_file_disabled(mock_convert, settings):
     """

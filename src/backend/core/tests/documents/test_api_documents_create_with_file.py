@@ -105,6 +105,68 @@ def test_api_documents_create_with_docx_file_success(mock_convert, mock_yhub, se
     assert mock_capture.call_count == 2
 
 
+@patch("core.api.viewsets.YHubService")
+@patch("core.services.converter_services.Converter.convert")
+def test_api_documents_create_with_file_indexes_document_links(
+    mock_convert, mock_yhub, settings
+):
+    """Creating a document with content triggers a document links reindex."""
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+    settings.CONVERSION_UPLOAD_ENABLED = True
+
+    converted_yjs = b"\x01\x02raw yjs update"
+    mock_convert.return_value = converted_yjs
+    upload = BytesIO(b"fake docx content")
+    upload.name = "linked.docx"
+
+    with (
+        patch("core.api.viewsets.reindex_document_links") as mock_reindex,
+        patch("core.api.viewsets.posthog_capture"),
+    ):
+        response = client.post(
+            "/api/v1.0/documents/",
+            {"file": upload},
+            format="multipart",
+        )
+
+    assert response.status_code == 201
+    document = Document.objects.get()
+    mock_reindex.assert_called_once_with(document.id, update=converted_yjs)
+    mock_yhub.return_value.create_ydoc.assert_called_once()
+
+
+@patch("core.api.viewsets.YHubService")
+@patch("core.services.converter_services.Converter.convert")
+def test_api_documents_create_with_file_seed_failure_skips_link_index(
+    mock_convert, mock_yhub, settings
+):
+    """When the content cannot be seeded, links are not indexed."""
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+    settings.CONVERSION_UPLOAD_ENABLED = True
+
+    mock_convert.return_value = b"\x01\x02raw yjs update"
+    mock_yhub.return_value.create_ydoc.side_effect = YHubServiceUnavailableError("down")
+    upload = BytesIO(b"fake docx content")
+    upload.name = "linked.docx"
+
+    with (
+        patch("core.api.viewsets.reindex_document_links") as mock_reindex,
+        patch("core.api.viewsets.posthog_capture"),
+    ):
+        response = client.post(
+            "/api/v1.0/documents/",
+            {"file": upload},
+            format="multipart",
+        )
+
+    assert response.status_code == 400
+    mock_reindex.assert_not_called()
+
+
 @patch("core.services.converter_services.Converter.convert")
 def test_api_documents_create_with_docx_file_disabled(mock_convert, settings):
     """

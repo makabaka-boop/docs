@@ -8,15 +8,17 @@ from unittest import mock
 from uuid import uuid4
 
 import jwt
+import pycrdt
 import pytest
 import responses
 from freezegun import freeze_time
 from rest_framework.test import APIClient
 
-from core import factories
+from core import factories, models
 from core.authentication import CollaborationServerAuthentication
 from core.models import Document
 from core.services.search_indexers import FindDocumentIndexer
+from core.services.yhub_services import ServiceUnavailableError, YHubService
 from core.tests.utils.jwt_helper import build_jwks, generate_key_pair, key_id
 from core.utils.yjs import base64_yjs_to_text
 
@@ -304,8 +306,124 @@ def test_api_documents_content_updated_unknown_document():
 def test_api_documents_content_updated_invalid_document_id():
     """A room name that is no document id should answer a 404, not a 500."""
     response = APIClient().post(
-        "/api/v1.0/documents/not-an-uuid/content-updated/",
+        f"/api/v1.0/documents/not-an-uuid/content-updated/",
         HTTP_AUTHORIZATION=f"Bearer {collaboration_token()}",
     )
 
     assert response.status_code == 404
+
+
+# --- backlinks (document links) indexing --------------------------------
+
+
+def update_with_interlink(source_id, target_id, with_link=True):
+    """Build a yjs update for a source document, with or without a link."""
+
+    children = []
+    if with_link:
+        children.append(
+            pycrdt.XmlElement(
+                "interlinkingLinkInline",
+                {
+                    "docId": str(target_id),
+                    "blockId": "",
+                    "disabled": False,
+                    "trigger": "/",
+                },
+            )
+        )
+    ydoc = pycrdt.Doc()
+    ydoc["document-store"] = pycrdt.XmlFragment(
+        [
+            pycrdt.XmlElement(
+                "blockGroup",
+                {},
+                [
+                    pycrdt.XmlElement(
+                        "blockContainer",
+                        {"id": "source-block-id"},
+                        [pycrdt.XmlElement("paragraph", {}, children)],
+                    )
+                ],
+            )
+        ]
+    )
+    return ydoc.get_update()
+
+
+def test_api_documents_content_updated_indexes_document_links():
+    """
+    Newly saved interlinking links are indexed on the content notification,
+    even without a configured search service.
+    """
+    source = factories.DocumentFactory()
+    target = factories.DocumentFactory()
+
+    with mock.patch.object(
+        YHubService,
+        "get_ydoc",
+        return_value=update_with_interlink(source.id, target.id),
+    ):
+        response = APIClient().post(
+            f"/api/v1.0/documents/{source.id!s}/content-updated/",
+            HTTP_AUTHORIZATION=f"Bearer {collaboration_token()}",
+        )
+
+    assert response.status_code == 204
+    link = models.DocumentLink.objects.get()
+    assert (link.source_id, link.target_id) == (source.id, target.id)
+    assert link.source_block_id == "source-block-id"
+
+
+def test_api_documents_content_updated_removes_deleted_document_links():
+    """A link removed from the saved content disappears on reindexing."""
+    source = factories.DocumentFactory()
+    target = factories.DocumentFactory()
+    factories.DocumentLinkFactory(
+        source=source, target=target, source_block_id="source-block-id"
+    )
+
+    with mock.patch.object(
+        YHubService,
+        "get_ydoc",
+        return_value=update_with_interlink(source.id, target.id, with_link=False),
+    ):
+        response = APIClient().post(
+            f"/api/v1.0/documents/{source.id!s}/content-updated/",
+            HTTP_AUTHORIZATION=f"Bearer {collaboration_token()}",
+        )
+
+    assert response.status_code == 204
+    assert not models.DocumentLink.objects.exists()
+
+
+def test_api_documents_content_updated_link_reindex_failure_is_not_fatal():
+    """The notification stays a success when the link task cannot read yhub."""
+    source = factories.DocumentFactory()
+    target = factories.DocumentFactory()
+    factories.DocumentLinkFactory(source=source, target=target)
+
+    with mock.patch.object(
+        YHubService, "get_ydoc", side_effect=ServiceUnavailableError("down")
+    ):
+        response = APIClient().post(
+            f"/api/v1.0/documents/{source.id!s}/content-updated/",
+            HTTP_AUTHORIZATION=f"Bearer {collaboration_token()}",
+        )
+
+    assert response.status_code == 204
+    source.refresh_from_db()  # updated_at was still refreshed
+    # the previous links were kept, the read failure was not an empty content
+    assert models.DocumentLink.objects.filter(source=source).count() == 1
+
+
+def test_api_documents_content_updated_unknown_document_schedules_no_link_task():
+    """No link indexing is scheduled when the document does not exist."""
+    with mock.patch("core.api.viewsets.index_document_links_task") as mocked_task:
+        response = APIClient().post(
+            f"/api/v1.0/documents/{uuid4()!s}/content-updated/",
+            HTTP_AUTHORIZATION=f"Bearer {collaboration_token()}",
+        )
+
+    assert response.status_code == 404
+    mocked_task.delay.assert_not_called()

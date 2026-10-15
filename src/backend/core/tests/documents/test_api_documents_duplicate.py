@@ -1175,3 +1175,116 @@ def test_api_documents_duplicate_content_conflict_is_compensated(mock_yhub):
         mock.call(seeded[1]),
     ]
     mock_capture.assert_not_called()
+
+
+# --- document links indexing carried by duplicated content --------------
+
+
+def update_with_link(target_id, block_id="source-block"):
+    """Build a yjs update whose only block links to the target document."""
+
+    ydoc = pycrdt.Doc()
+    ydoc["document-store"] = pycrdt.XmlFragment(
+        [
+            pycrdt.XmlElement(
+                "blockGroup",
+                {},
+                [
+                    pycrdt.XmlElement(
+                        "blockContainer",
+                        {"id": block_id},
+                        [
+                            pycrdt.XmlElement(
+                                "paragraph",
+                                {},
+                                [
+                                    pycrdt.XmlElement(
+                                        "interlinkingLinkInline",
+                                        {
+                                            "docId": str(target_id),
+                                            "blockId": "",
+                                            "disabled": False,
+                                            "trigger": "/",
+                                        },
+                                    )
+                                ],
+                            )
+                        ],
+                    )
+                ],
+            )
+        ]
+    )
+    return ydoc.get_update()
+
+
+def test_api_documents_duplicate_indexes_its_document_links(mock_yhub):
+    """
+    The links the copied content contains are indexed for the new document,
+    without anyone editing the copy (no content notification follows a seed).
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    target = factories.DocumentFactory(title="target")
+    source = factories.DocumentFactory(users=[(user, "owner")], title="source")
+    mock_yhub.contents[source.id] = update_with_link(target.id)
+
+    response = client.post(f"/api/v1.0/documents/{source.id!s}/duplicate/")
+
+    assert response.status_code == 201
+    duplicated = models.Document.objects.get(id=response.json()["id"])
+
+    link = models.DocumentLink.objects.get(source=duplicated)
+    assert link.target == target
+    assert link.source_block_id == "source-block"
+    # the original document was not given links of its own
+    assert not models.DocumentLink.objects.filter(source=source).exists()
+
+
+def test_api_documents_duplicate_with_descendants_indexes_child_links(mock_yhub):
+    """Links carried by a duplicated child document are indexed as well."""
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    target = factories.DocumentFactory(title="target")
+    root = factories.DocumentFactory(users=[(user, "owner")], title="Root")
+    child = factories.DocumentFactory(parent=root, title="Child")
+    mock_yhub.contents[child.id] = update_with_link(target.id, "child-block")
+
+    response = client.post(
+        f"/api/v1.0/documents/{root.id!s}/duplicate/",
+        {"with_descendants": True},
+        format="json",
+    )
+
+    assert response.status_code == 201
+    duplicated_root = models.Document.objects.get(id=response.json()["id"])
+    duplicated_child = duplicated_root.get_children().get(duplicated_from=child)
+
+    assert models.DocumentLink.objects.filter(
+        source=duplicated_child,
+        target=target,
+        source_block_id="child-block",
+    ).exists()
+
+
+def test_api_documents_duplicate_failure_leaves_no_document_links(mock_yhub):
+    """When the seeding fails, the duplicate and its links are both gone."""
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    target = factories.DocumentFactory()
+    source = factories.DocumentFactory(users=[(user, "owner")], title="source")
+    mock_yhub.contents[source.id] = update_with_link(target.id)
+    mock_yhub.return_value.create_ydoc.side_effect = YHubServiceUnavailableError(
+        "Failed to connect to the yhub service"
+    )
+
+    response = client.post(f"/api/v1.0/documents/{source.id!s}/duplicate/")
+
+    assert response.status_code == 500
+    assert models.DocumentLink.objects.count() == 0

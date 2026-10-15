@@ -257,6 +257,41 @@ def test_api_documents_create_for_owner_existing(mock_convert_md, mock_yhub):
 
 
 @override_settings(SERVER_TO_SERVER_API_TOKENS=["DummyToken"])
+def test_api_documents_create_for_owner_indexes_document_links(
+    mock_convert_md, mock_yhub
+):
+    """A server-to-server creation reindexes the links the content carries."""
+    user = factories.UserFactory(language="en-us")
+
+    data = {
+        "title": "My Document",
+        "content": "Document content",
+        "sub": str(user.sub),
+        "email": "irrelevant@example.com",
+    }
+
+    with (
+        mock.patch("core.api.serializers.posthog_capture"),
+        mock.patch("core.api.serializers.reindex_document_links") as mock_reindex,
+        mock.patch.object(
+            ServerCreateDocumentSerializer, "_send_email_notification"
+        ) as mock_email,
+    ):
+        response = APIClient().post(
+            "/api/v1.0/documents/create-for-owner/",
+            data,
+            format="json",
+            HTTP_AUTHORIZATION="Bearer DummyToken",
+        )
+
+    assert response.status_code == 201
+    document = Document.objects.get()
+    mock_reindex.assert_called_once_with(document.id, update=CONVERTED_CONTENT)
+    mock_yhub.return_value.create_ydoc.assert_called_once()
+    mock_email.assert_called_once()
+
+
+@override_settings(SERVER_TO_SERVER_API_TOKENS=["DummyToken"])
 def test_api_documents_create_for_owner_new_user(mock_convert_md, mock_yhub):
     """
     It should be possible to create a document on behalf of new users by

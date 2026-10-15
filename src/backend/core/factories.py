@@ -194,6 +194,19 @@ class DocumentAskForAccessFactory(factory.django.DjangoModelFactory):
     role = factory.fuzzy.FuzzyChoice([r[0] for r in models.RoleChoices.choices])
 
 
+class DocumentLinkFactory(factory.django.DjangoModelFactory):
+    """A factory for interlinking links from one document to another."""
+
+    class Meta:
+        model = models.DocumentLink
+
+    source = factory.SubFactory(DocumentFactory)
+    target = factory.SubFactory(DocumentFactory)
+    source_block_id = factory.Faker("uuid4")
+    target_block_id = ""
+    excerpt = factory.Faker("text", max_nb_chars=100)
+
+
 class InvitationFactory(factory.django.DjangoModelFactory):
     """A factory to create invitations for a user"""
 

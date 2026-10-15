@@ -1,6 +1,7 @@
 """Client serializers for the impress core app."""
 # pylint: disable=too-many-lines
 
+import logging
 import mimetypes
 from os.path import splitext
 
@@ -22,9 +23,12 @@ from core.services.converter_services import (
     ConversionError,
     Converter,
 )
+from core.services.document_links import reindex_document_links
 from core.services.yhub_services import YHubError, YHubService
 from core.utils.analytics import PosthogEventName, posthog_capture
 from core.utils.treebeard import create_tree_node_with_retry
+
+logger = logging.getLogger(__name__)
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -510,6 +514,16 @@ class ServerCreateDocumentSerializer(serializers.Serializer):
                 raise serializers.ValidationError(
                     {"content": ["Could not save the document content"]}
                 ) from err
+
+            # the content was seeded straight to yhub: index its links now,
+            # a failure does not undo the document creation
+            try:
+                reindex_document_links(document.id, update=document_content)
+            except Exception:  # pylint: disable=broad-except
+                logger.exception(
+                    "Could not index the document links of new document %s",
+                    document.id,
+                )
 
         posthog_capture(PosthogEventName.DOC_CREATED, user, {}, document=document)
         posthog_capture(
@@ -997,6 +1011,22 @@ class ThreadSerializer(serializers.ModelSerializer):
         if request:
             return thread.get_abilities(request.user)
         return {}
+
+
+class BacklinkBlockSerializer(serializers.Serializer):
+    """One referencing block of a source document, as the panel lists it."""
+
+    source_block_id = serializers.CharField()
+    target_block_id = serializers.CharField()
+    excerpt = serializers.CharField()
+
+
+class BacklinkSourceSerializer(serializers.Serializer):
+    """A source document and the blocks of it referencing the current one."""
+
+    id = serializers.UUIDField()
+    title = serializers.CharField(allow_null=True, allow_blank=True)
+    links = BacklinkBlockSerializer(many=True)
 
 
 class MentionSerializer(serializers.ModelSerializer):

@@ -310,6 +310,7 @@ def test_models_users_duplicate_onboarding_sandbox_document_with_invalid_templat
 
 def test_models_users_duplicate_onboarding_sandbox_document_copies_the_content(
     collaboration_server,
+    django_capture_on_commit_callbacks,
 ):
     """
     The content of the sandbox is the one the collaboration server holds for
@@ -318,11 +319,22 @@ def test_models_users_duplicate_onboarding_sandbox_document_copies_the_content(
     mock_get_ydoc, mock_create_ydoc = collaboration_server
     template_document = factories.DocumentFactory(title="Getting started with Docs")
 
-    with override_settings(USER_ONBOARDING_SANDBOX_DOCUMENT=str(template_document.id)):
+    with (
+        override_settings(USER_ONBOARDING_SANDBOX_DOCUMENT=str(template_document.id)),
+        patch("impress.celery_app.app.send_task") as mock_send_task,
+        django_capture_on_commit_callbacks(execute=True),
+    ):
         user = factories.UserFactory()
 
     sandbox_document = models.Document.objects.get(
         creator=user, title="Getting started with Docs"
+    )
+
+    # the links the template carries are reindexed once the signup commits,
+    # without the new user editing the sandbox
+    mock_send_task.assert_called_once_with(
+        "core.tasks.document_links.index_document_links_task",
+        args=[str(sandbox_document.id)],
     )
 
     # read from the template, written to the sandbox
