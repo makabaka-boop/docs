@@ -392,12 +392,18 @@ interface BlockNoteReaderProps {
   docId: Doc['id'];
   initialContent: Y.XmlFragment;
   isMainEditor?: boolean;
+  /**
+   * Hands the read-only editor to the parent whenever it is (re)created. The
+   * history preview uses it to read the blocks the user has selected.
+   */
+  onEditorReady?: (editor: DocsBlockNoteEditor) => void;
 }
 
 export const BlockNoteReader = ({
   docId,
   initialContent,
   isMainEditor = true,
+  onEditorReady,
 }: BlockNoteReaderProps) => {
   const { user } = useAuth();
   const { setEditor } = useEditorStore();
@@ -440,6 +446,10 @@ export const BlockNoteReader = ({
       setEditor(undefined);
     };
   }, [setEditor, editor, isMainEditor]);
+
+  useEffect(() => {
+    onEditorReady?.(editor);
+  }, [editor, onEditorReady]);
 
   useHeadings(editor);
 

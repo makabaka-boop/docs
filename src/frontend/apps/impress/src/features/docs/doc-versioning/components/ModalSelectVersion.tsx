@@ -5,16 +5,23 @@ import {
   useModal,
 } from '@gouvfr-lasuite/ui-components';
 import dynamic from 'next/dynamic';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { createGlobalStyle, css } from 'styled-components';
 
 import { Box, ButtonCloseModal, Text } from '@/components';
+import type { DocsBlockNoteEditor } from '@/docs/doc-editor/index';
 import { Doc } from '@/docs/doc-management';
 
-import { DocVersion } from '../types';
+import { useVersionInsertStore } from '../stores/useVersionInsertStore';
+import type { DocVersion } from '../types';
+import {
+  cloneBlocksForReinsert,
+  pickBlocksInDocumentOrder,
+} from '../utils';
 
 import { DocVersionEditor } from './DocVersionEditor';
+import { VersionBlockSelector } from './VersionBlockSelector';
 import { VersionList } from './VersionList';
 
 const ModalConfirmationVersion = dynamic(
@@ -49,8 +56,62 @@ export const ModalSelectVersion = ({
   const { t } = useTranslation();
   const [selectedVersionId, setSelectedVersionId] =
     useState<DocVersion['id']>();
+  const [selectedBlockIds, setSelectedBlockIds] = useState<string[]>([]);
+  const [versionEditor, setVersionEditor] = useState<DocsBlockNoteEditor>();
   const canRestore = doc.abilities.partial_update;
   const restoreModal = useModal();
+  const startReinsert = useVersionInsertStore(
+    (state) => state.startReinsert,
+  );
+
+  const handleSelectVersion = useCallback(
+    (versionId: DocVersion['id']) => {
+      // switching versions discards the unconfirmed block choice
+      setSelectedBlockIds([]);
+      setSelectedVersionId(versionId);
+    },
+    [],
+  );
+
+  const handleEditorReady = useCallback((editor: DocsBlockNoteEditor) => {
+    setVersionEditor(editor);
+  }, []);
+
+  /**
+   * Partial retrieval: snapshot the selected top-level blocks (with their
+   * children), detached from the historical document and with fresh ids, then
+   * close the modal so the live document can ask where to insert them. The
+   * current document is never replaced, so every edit made since this
+   * version — including ones made while this modal was open — stays.
+   */
+  const handleReinsert = useCallback(() => {
+    if (!selectedVersionId || !versionEditor) {
+      return;
+    }
+
+    const blocks = pickBlocksInDocumentOrder(
+      versionEditor.document,
+      selectedBlockIds,
+    );
+
+    if (blocks.length === 0) {
+      return;
+    }
+
+    startReinsert({
+      docId: doc.id,
+      versionId: selectedVersionId,
+      blocks: cloneBlocksForReinsert(blocks),
+    });
+    onClose();
+  }, [
+    doc.id,
+    onClose,
+    selectedBlockIds,
+    selectedVersionId,
+    startReinsert,
+    versionEditor,
+  ]);
 
   return (
     <>
@@ -79,32 +140,52 @@ export const ModalSelectVersion = ({
             {t('Version history')}
           </Text>
           <Box
+            $direction="column"
             $css={css`
-              display: flex;
-              flex-direction: row;
-              justify-content: center;
-              overflow-y: auto;
               flex: 1;
+              overflow: hidden;
+              min-width: 0;
             `}
           >
+            {canRestore && selectedVersionId && versionEditor && (
+              <VersionBlockSelector
+                key={selectedVersionId}
+                editor={versionEditor}
+                selectedIds={selectedBlockIds}
+                onChangeSelectedIds={setSelectedBlockIds}
+                onConfirm={handleReinsert}
+              />
+            )}
             <Box
-              $width="100%"
-              $padding={{ horizontal: 'base', vertical: 'xl' }}
-              $align="center"
+              $css={css`
+                display: flex;
+                flex-direction: row;
+                justify-content: center;
+                overflow-y: auto;
+                flex: 1;
+                min-height: 0;
+              `}
             >
-              {selectedVersionId && (
-                <DocVersionEditor
-                  docId={doc.id}
-                  versionId={selectedVersionId}
-                />
-              )}
-              {!selectedVersionId && (
-                <Box $align="center" $justify="center" $height="100%">
-                  <Text $size="h6" $weight="bold">
-                    {t('Select a version on the right to restore')}
-                  </Text>
-                </Box>
-              )}
+              <Box
+                $width="100%"
+                $padding={{ horizontal: 'base', vertical: 'xl' }}
+                $align="center"
+              >
+                {selectedVersionId && (
+                  <DocVersionEditor
+                    docId={doc.id}
+                    versionId={selectedVersionId}
+                    onEditorReady={handleEditorReady}
+                  />
+                )}
+                {!selectedVersionId && (
+                  <Box $align="center" $justify="center" $height="100%">
+                    <Text $size="h6" $weight="bold">
+                      {t('Select a version on the right to restore')}
+                    </Text>
+                  </Box>
+                )}
+              </Box>
             </Box>
           </Box>
           <Box
@@ -149,7 +230,7 @@ export const ModalSelectVersion = ({
 
               <VersionList
                 doc={doc}
-                onSelectVersion={setSelectedVersionId}
+                onSelectVersion={handleSelectVersion}
                 selectedVersionId={selectedVersionId}
               />
             </Box>

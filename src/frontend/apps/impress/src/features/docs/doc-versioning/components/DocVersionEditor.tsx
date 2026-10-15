@@ -6,6 +6,7 @@ import * as Y from 'yjs';
 import { Box, Text, TextErrors } from '@/components';
 import { BlockNoteReader } from '@/docs/doc-editor/components/BlockNoteEditor';
 import { DocEditorContainer } from '@/docs/doc-editor/components/DocEditor';
+import type { DocsBlockNoteEditor } from '@/docs/doc-editor/index';
 import { Doc, base64ToBlocknoteXmlFragment } from '@/docs/doc-management';
 
 import { useDocVersion } from '../api/useDocVersion';
@@ -16,11 +17,13 @@ import { DocVersionHeader } from './DocVersionHeader';
 interface DocVersionEditorProps {
   docId: Doc['id'];
   versionId: DocVersion['id'];
+  onEditorReady?: (editor: DocsBlockNoteEditor) => void;
 }
 
 export const DocVersionEditor = ({
   docId,
   versionId,
+  onEditorReady,
 }: DocVersionEditorProps) => {
   const {
     data: version,
@@ -97,6 +100,7 @@ export const DocVersionEditor = ({
          */
         docId={versionId}
         isMainEditor={false}
+        onEditorReady={onEditorReady}
       />
     </DocEditorContainer>
   );

@@ -36,6 +36,16 @@ const DocEditor = dynamic(
   },
 );
 
+const VersionInsertPositionPicker = dynamic(
+  () =>
+    import(
+      '@/docs/doc-versioning/components/VersionInsertPositionPicker'
+    ).then((mod) => ({
+      default: mod.VersionInsertPositionPicker,
+    })),
+  { ssr: false },
+);
+
 export function DocLayout() {
   const {
     query: { id },
@@ -216,6 +226,7 @@ const DocPage = ({ id }: DocProps) => {
         />
       </Head>
       <DocEditor doc={doc} />
+      <VersionInsertPositionPicker docId={doc.id} />
     </>
   );
 };

@@ -1,4 +1,119 @@
+import type { Block, PartialBlock } from '@blocknote/core';
+
+import type {
+  DocsBlockNoteEditor,
+  DocsBlockSchema,
+  DocsInlineContentSchema,
+  DocsStyleSchema,
+} from '@/docs/doc-editor';
+
 import { ActivityEntry, DocVersion } from './types';
+
+/**
+ * Selector for the DOM element BlockNote renders for every block: the
+ * `blockContainer` node carries the block id in `data-id`.
+ */
+export const BLOCK_CONTAINER_SELECTOR = '[data-node-type="blockContainer"]';
+
+/**
+ * The blocks "Retrieve from history" inserts in the live document. Partial on
+ * purpose: their ids are stripped so the editor mints fresh ones.
+ */
+export type ReinsertBlock = PartialBlock<
+  DocsBlockSchema,
+  DocsInlineContentSchema,
+  DocsStyleSchema
+>;
+
+/**
+ * Find a block's container element by id, without building a CSS selector
+ * from the id (ids may contain characters that need escaping).
+ */
+export const findBlockContainer = (
+  root: ParentNode,
+  id: string,
+): HTMLElement | null => {
+  const elements =
+    root.querySelectorAll<HTMLElement>(BLOCK_CONTAINER_SELECTOR);
+
+  return (
+    Array.from(elements).find((element) => element.dataset.id === id) ?? null
+  );
+};
+
+/**
+ * Resolve the top-level block an element belongs to.
+ *
+ * Retrieval always moves *complete* top-level blocks together with their
+ * children, so a click anywhere inside a nested block (or a column) selects
+ * the outermost block rather than the nested one. Returns `null` outside any
+ * block.
+ */
+export const getTopLevelBlockId = (
+  editor: DocsBlockNoteEditor,
+  element: Element | null,
+): string | null => {
+  const container = element?.closest?.<HTMLElement>(BLOCK_CONTAINER_SELECTOR);
+  let id = container?.dataset.id;
+
+  if (!id) {
+    return null;
+  }
+
+  let parent = editor.getParentBlock(id);
+  while (parent) {
+    id = parent.id;
+    parent = editor.getParentBlock(id);
+  }
+
+  return id;
+};
+
+/**
+ * Pick blocks out of a document snapshot in document order.
+ *
+ * The source of truth for the order is the historical document, not the
+ * order the user happened to click blocks in: retrieved blocks must land in
+ * the order they had in the version.
+ */
+export const pickBlocksInDocumentOrder = (
+  documentBlocks: Block<DocsBlockSchema, DocsInlineContentSchema, DocsStyleSchema>[],
+  ids: Iterable<string>,
+): Block<DocsBlockSchema, DocsInlineContentSchema, DocsStyleSchema>[] => {
+  const wanted = new Set(ids);
+
+  return documentBlocks.filter((block) => wanted.has(block.id));
+};
+
+/**
+ * Turn snapshots read from a past version into brand-new blocks the live
+ * document can adopt.
+ *
+ * Two things make the copies new:
+ * - the id is dropped at every nesting level, so BlockNote mints fresh ids.
+ *   A block that survived untouched since that version still carries the
+ *   very same id, and inserting a second block with that id would give the
+ *   document two answers to "which block is this one" — anchors, comments
+ *   and every `getBlock` call rely on id uniqueness;
+ * - a structural clone detaches the snapshots from the historical Yjs
+ *   document, so inserting them mutates only the live one.
+ *
+ * Types, text styles, nesting and table data come across untouched. Comment
+ * marks need no surgery: they are tagged `blocknoteIgnore` by the comments
+ * extension and never appear in the Block JSON an editor snapshots, so the
+ * copies carry no thread ids and no historical comment is re-attached.
+ */
+export const cloneBlocksForReinsert = (
+  blocks: Block<DocsBlockSchema, DocsInlineContentSchema, DocsStyleSchema>[],
+): ReinsertBlock[] =>
+  blocks.map((block) => {
+    const { id: _id, children, ...rest } = block;
+
+    return {
+      ...structuredClone(rest),
+      children: cloneBlocksForReinsert(children ?? []),
+    };
+  });
 
 /**
  * How coarse the version history is: neighbouring changes closer together than

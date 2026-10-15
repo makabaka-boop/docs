@@ -1,10 +1,137 @@
-import { describe, expect, it } from 'vitest';
+import type { Block } from '@blocknote/core';
+
+import type {
+  DocsBlockSchema,
+  DocsInlineContentSchema,
+  DocsStyleSchema,
+} from '@/docs/doc-editor';
 
 import { ActivityEntry } from '../types';
 import {
   VERSION_GRANULARITY_MS_FALLBACK as G,
+  cloneBlocksForReinsert,
   mergeActivityEntries,
+  pickBlocksInDocumentOrder,
 } from '../utils';
+
+type AnyBlock = Block<DocsBlockSchema, DocsInlineContentSchema, DocsStyleSchema>;
+
+const paragraph = (
+  id: string,
+  text: string,
+  children: AnyBlock[] = [],
+  props: Record<string, unknown> = {},
+): AnyBlock =>
+  ({
+    id,
+    type: 'paragraph',
+    props: {
+      backgroundColor: 'default',
+      textAlignment: 'left',
+      textColor: 'default',
+      ...props,
+    },
+    content: [{ type: 'text', text, styles: { bold: true } }],
+    children,
+  }) as unknown as AnyBlock;
+
+describe('partial retrieval helpers', () => {
+  it('keeps the historical order, not the click order', () => {
+    const documentBlocks = [
+      paragraph('a', 'A'),
+      paragraph('b', 'B'),
+      paragraph('c', 'C'),
+    ];
+
+    const picked = pickBlocksInDocumentOrder(documentBlocks, ['c', 'a']);
+
+    expect(picked.map((block) => block.id)).toEqual(['a', 'c']);
+  });
+
+  it('ignores ids that are not top-level blocks', () => {
+    const documentBlocks = [paragraph('a', 'A')];
+
+    expect(
+      pickBlocksInDocumentOrder(documentBlocks, ['nope', 'a']).map(
+        (block) => block.id,
+      ),
+    ).toEqual(['a']);
+  });
+
+  it('drops ids at every level so the copies are new blocks', () => {
+    const blocks = [
+      paragraph('a', 'A', [paragraph('a-child', 'Nested')]),
+      paragraph('b', 'B'),
+    ];
+
+    const copies = cloneBlocksForReinsert(blocks);
+
+    expect(copies[0].id).toBeUndefined();
+    expect(copies[1].id).toBeUndefined();
+    expect(copies[0].children?.[0].id).toBeUndefined();
+    // originals are untouched
+    expect(blocks[0].id).toBe('a');
+    expect(blocks[0].children[0].id).toBe('a-child');
+  });
+
+  it('preserves type, text styles, props and the nested structure', () => {
+    const blocks = [
+      paragraph('a', 'A', [paragraph('child', 'Nested')], { level: 2 }),
+    ];
+
+    const [copy] = cloneBlocksForReinsert(blocks);
+
+    expect(copy.type).toBe('paragraph');
+    expect(copy.props).toMatchObject({ level: 2 });
+    expect(copy.content).toEqual([
+      { type: 'text', text: 'A', styles: { bold: true } },
+    ]);
+    expect(copy.children).toHaveLength(1);
+    expect(copy.children?.[0].content).toEqual([
+      { type: 'text', text: 'Nested', styles: { bold: true } },
+    ]);
+  });
+
+  it('carries table data over unchanged', () => {
+    const table = {
+      id: 't',
+      type: 'table',
+      props: { textColor: 'default' },
+      content: {
+        type: 'tableContent',
+        columnWidths: [undefined, undefined],
+        rows: [
+          {
+            cells: [
+              [{ type: 'text', text: 'one', styles: {} }],
+              [{ type: 'text', text: 'two', styles: {} }],
+            ],
+          },
+        ],
+      },
+      children: [],
+    };
+
+    const [copy] = cloneBlocksForReinsert([table as unknown as AnyBlock]);
+
+    expect(copy.id).toBeUndefined();
+    expect(copy.content).toEqual(table.content);
+  });
+
+  it('returns detached copies', () => {
+    const blocks = [paragraph('a', 'A')];
+
+    const [copy] = cloneBlocksForReinsert(blocks);
+    const copiedContent = copy.content as unknown as Array<{ text: string }>;
+    copiedContent[0].text = 'changed';
+
+    const originalContent = blocks[0].content as unknown as Array<{
+      text: string;
+    }>;
+    expect(originalContent[0].text).toBe('A');
+  });
+});
+
 
 /**
  * `mergeActivityEntries` is the only part of the history policy that lives in
